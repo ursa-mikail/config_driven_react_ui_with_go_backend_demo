@@ -1,0 +1,101 @@
+{
+  "title": "Nimbus Pipeline",
+  "subtitle": "Tell the pipeline how to behave. Nothing runs until you say so.",
+  "steps": [
+    {
+      "id": "basics", "title": "The basics", "icon": "✦",
+      "subtitle": "Name your pipeline and say where it will live.",
+      "fields": [
+        {"key": "project_name", "type": "text", "label": "Project name", "required": true, "default": "my-pipeline",
+         "help": "Lowercase letters, numbers and dashes. Shows up in logs and file names.",
+         "placeholder": "e.g. daily-sales-sync", "pattern": "^[a-z0-9][a-z0-9-]{1,30}$", "patternMsg": "Use 2–31 lowercase letters, numbers or dashes."},
+        {"key": "description", "type": "textarea", "label": "What does it do?", "help": "Optional. A sentence for your future self.", "placeholder": "Copies new orders into the warehouse every night…"},
+        {"key": "environment", "type": "radio", "label": "Environment", "required": true, "default": "dev", "recommended": "dev",
+         "help": "Production turns on safety checks and stricter retries.",
+         "options": [
+           {"value": "dev", "label": "Development", "desc": "Safe to break things", "icon": "🧪"},
+           {"value": "staging", "label": "Staging", "desc": "Rehearsal with real-ish data", "icon": "🎭"},
+           {"value": "prod", "label": "Production", "desc": "Live, careful, audited", "icon": "🚀"}]},
+        {"key": "region", "type": "select", "label": "Region", "required": true, "default": "us-west",
+         "help": "Pick the region closest to your data.",
+         "options": [
+           {"value": "us-west", "label": "US West", "desc": "Oregon"},
+           {"value": "us-east", "label": "US East", "desc": "Virginia"},
+           {"value": "eu-central", "label": "Europe", "desc": "Frankfurt"},
+           {"value": "ap-south", "label": "Asia Pacific", "desc": "Mumbai"}]}
+      ]
+    },
+    {
+      "id": "source", "title": "Data source", "icon": "⇣",
+      "subtitle": "Where does the data come from?",
+      "fields": [
+        {"key": "source_type", "type": "select", "label": "Source type", "required": true, "default": "postgres",
+         "help": "The system the pipeline reads from.",
+         "options": [
+           {"value": "postgres", "label": "PostgreSQL", "desc": "Relational database"},
+           {"value": "s3", "label": "Object storage", "desc": "S3-compatible bucket"},
+           {"value": "kafka", "label": "Kafka", "desc": "Event stream"},
+           {"value": "http", "label": "HTTP API", "desc": "REST endpoint"}]},
+        {"key": "source_url", "type": "text", "label": "Connection address", "required": true, "default": "postgres://reader@db.internal:5432/sales",
+         "help": "Where to connect. Include the scheme, like postgres:// or https://.", "pattern": "^[a-z0-9+.-]+://\\S+$", "patternMsg": "Start with a scheme, e.g. https://"},
+        {"key": "source_password", "type": "password", "label": "Access secret", "help": "Optional for public sources. Stored in the config file as plain text.", "showIf": {"key": "source_type", "in": ["postgres", "kafka", "http"]}},
+        {"key": "use_tls", "type": "toggle", "label": "Encrypt the connection", "default": true, "recommended": true, "help": "Uses TLS. Turn off only for local testing."},
+        {"key": "poll_seconds", "type": "slider", "label": "Check for new data every", "default": 30, "min": 5, "max": 300, "step": 5, "unit": "seconds", "recommended": 30,
+         "help": "Lower is fresher, higher is gentler on the source."}
+      ]
+    },
+    {
+      "id": "processing", "title": "Processing", "icon": "⚙",
+      "subtitle": "How hard should the pipeline work, and what should it do to the data?",
+      "fields": [
+        {"key": "workers", "type": "number", "label": "Parallel workers", "required": true, "default": 4, "min": 1, "max": 32, "step": 1, "recommended": 4,
+         "help": "Each worker handles one batch at a time. More workers finish faster and use more memory."},
+        {"key": "batch_size", "type": "slider", "label": "Records per batch", "default": 500, "min": 100, "max": 5000, "step": 100, "unit": "records", "help": "Bigger batches are efficient but slower to retry."},
+        {"key": "transforms", "type": "multicheck", "label": "Cleanup steps", "default": ["dedupe"], "help": "Pick any number. They run in the order shown.",
+         "options": [
+           {"value": "dedupe", "label": "Remove duplicates", "desc": "Same ID twice? Keep one"},
+           {"value": "normalize", "label": "Normalize text", "desc": "Trim, lowercase, fix encoding"},
+           {"value": "mask_pii", "label": "Mask personal data", "desc": "Hide emails and phones"},
+           {"value": "enrich", "label": "Add geo details", "desc": "Look up city from postcode"}]},
+        {"key": "compression", "type": "radio", "label": "Compression", "default": "gzip", "help": "Applies to everything written out.",
+         "options": [
+           {"value": "none", "label": "None", "desc": "Biggest files"},
+           {"value": "gzip", "label": "Gzip", "desc": "Good balance"},
+           {"value": "zstd", "label": "Zstandard", "desc": "Smallest and fast"}]}
+      ]
+    },
+    {
+      "id": "output", "title": "Output", "icon": "⇡",
+      "subtitle": "What should the finished data look like, and where does it go?",
+      "fields": [
+        {"key": "format", "type": "select", "label": "File format", "required": true, "default": "parquet",
+         "options": [
+           {"value": "json", "label": "JSON Lines", "desc": "Easy to read"},
+           {"value": "csv", "label": "CSV", "desc": "Opens in any spreadsheet"},
+           {"value": "parquet", "label": "Parquet", "desc": "Compact, fast to query"}]},
+        {"key": "destination", "type": "text", "label": "Destination folder", "required": true, "default": "/data/output", "help": "Where result files are written.", "placeholder": "/data/output"},
+        {"key": "tags", "type": "tags", "label": "Labels", "default": ["nightly"], "help": "Type a label and press Enter. Handy for filtering later."},
+        {"key": "start_date", "type": "date", "label": "Start from", "help": "Ignore anything older than this day. Leave empty to include everything."},
+        {"key": "accent", "type": "color", "label": "Label color", "default": "#7c5cff", "help": "Used to color this pipeline in dashboards."}
+      ]
+    },
+    {
+      "id": "ops", "title": "Monitoring", "icon": "◉",
+      "subtitle": "How loudly should the pipeline talk, and who hears about problems?",
+      "fields": [
+        {"key": "log_level", "type": "radio", "label": "Log detail", "required": true, "default": "info", "recommended": "info",
+         "help": "Debug shows everything. Error shows only failures.",
+         "options": [
+           {"value": "debug", "label": "Debug", "desc": "Every step"},
+           {"value": "info", "label": "Info", "desc": "Key events"},
+           {"value": "warn", "label": "Warnings", "desc": "Only trouble"},
+           {"value": "error", "label": "Errors", "desc": "Only failures"}]},
+        {"key": "metrics", "type": "checkbox", "label": "Publish metrics", "default": true, "help": "Exposes health numbers for dashboards."},
+        {"key": "alert_email", "type": "text", "label": "Alert email", "required": true, "default": "", "placeholder": "you@company.com",
+         "help": "Who to tell when something breaks.", "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", "patternMsg": "Enter a valid email, like you@company.com", "showIf": {"key": "metrics", "equals": true}},
+        {"key": "max_retries", "type": "slider", "label": "Retries before giving up", "default": 3, "min": 0, "max": 10, "step": 1, "unit": "times", "recommended": 3},
+        {"key": "accept_terms", "type": "checkbox", "label": "I understand this pipeline will read and write real data", "required": true, "default": false, "help": "Required before you can launch."}
+      ]
+    }
+  ]
+}

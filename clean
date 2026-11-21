@@ -1,0 +1,2 @@
+#!/bin/sh
+cd "$(dirname "$0")" && docker compose down -v --rmi local --remove-orphans && rm -f data/config.json data/last_run.json && printf "  Everything cleaned.\n"

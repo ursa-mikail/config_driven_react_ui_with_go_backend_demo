@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: studio, POSTGRES_PASSWORD: studio, POSTGRES_DB: studio }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U studio"], interval: 3s, timeout: 3s, retries: 20 }
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgres://studio:studio@db:5432/studio?sslmode=disable
+      OPTIONS_FILE: /app/options.json
+      CONFIG_FILE: /data/config.json
+    volumes: ["./options.json:/app/options.json:ro", "./data:/data"]
+    depends_on: { db: { condition: service_healthy } }
+  web:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on: [api]
+volumes:
+  pgdata:
