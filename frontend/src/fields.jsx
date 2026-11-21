@@ -40,7 +40,7 @@ function Slider({ f, value, onChange }) {
   return (
     <div className="slider" style={{ '--p': p + '%' }}>
       <div className="bubble" style={{ left: `calc(${p}% + ${10 - p * 0.2}px)` }}>{v}<span> {f.unit}</span></div>
-      <input id={f.key} type="range" min={f.min} max={f.max} step={f.step} value={v} onChange={e => onChange(Number(e.target.value))} />
+      <input id={f.key} type="range" min={f.min} max={f.max} step={f.step} value={v} aria-valuetext={`${v} ${f.unit || ''}`.trim()} onChange={e => onChange(Number(e.target.value))} />
       <div className="ends"><span>{f.min}</span><span>{f.max}</span></div>
     </div>
   )
@@ -137,7 +137,7 @@ const SW = ['#7c5cff', '#4de1d0', '#ff5fa2', '#ffb454', '#6ee77a', '#4da3ff', '#
 function Color({ value, onChange }) {
   return (
     <div className="swatches">
-      {SW.map(c => <button type="button" key={c} aria-label={c} className={cx('sw', value === c && 'on')} style={{ background: c }} onClick={() => onChange(c)} />)}
+      {SW.map(c => <button type="button" key={c} aria-label={c} aria-pressed={value === c} className={cx('sw', value === c && 'on')} style={{ background: c }} onClick={() => onChange(c)} />)}
       <label className="sw custom" title="Pick any color"><input type="color" value={value || '#7c5cff'} onChange={e => onChange(e.target.value)} /><span>+</span></label>
       <code>{value}</code>
     </div>

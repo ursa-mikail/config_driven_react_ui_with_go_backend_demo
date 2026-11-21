@@ -10,6 +10,7 @@ services:
       DATABASE_URL: postgres://studio:studio@db:5432/studio?sslmode=disable
       OPTIONS_FILE: /app/options.json
       CONFIG_FILE: /data/config.json
+      CONFIG_FILE_MODE: "0600"   # owner-only, because the file can hold a secret. Use "0644" if you need to read it on the host without sudo.
     volumes: ["./options.json:/app/options.json:ro", "./data:/data"]
     depends_on: { db: { condition: service_healthy } }
   web:

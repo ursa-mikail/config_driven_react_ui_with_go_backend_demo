@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Field } from './fields.jsx'
-import { api, build, fmt, stepErrors, visible } from './lib.js'
+import { api, build, fmt, stepErrors, visible, when } from './lib.js'
 const cx = (...a) => a.filter(Boolean).join(' ')
 
 function Ring({ pct }) {
   const r = 34, c = 2 * Math.PI * r
   return (
-    <svg className="ring" viewBox="0 0 80 80" aria-label={`${pct}% complete`}>
+    <svg className="ring" viewBox="0 0 80 80" role="img" aria-label={`${pct}% complete`}>
       <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#8b6cff" /><stop offset=".6" stopColor="#ff5fa2" /><stop offset="1" stopColor="#ffb454" /></linearGradient></defs>
       <circle cx="40" cy="40" r={r} className="trk" />
       <circle cx="40" cy="40" r={r} className="bar" strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} />
@@ -57,15 +57,42 @@ export default function App() {
   const [fatal, setFatal] = useState(null)
   const [shake, setShake] = useState(0)
   const [focusKey, setFocusKey] = useState(null)
+  const [edited, setEdited] = useState(false)
+  const [hist, setHist] = useState([])
   const term = useRef()
   const timer = useRef()
+  const head = useRef()
+  const firstStep = useRef(true)
+
+  const poll = () => {
+    clearInterval(timer.current)
+    timer.current = setInterval(async () => {
+      try { const r = await api('/run'); setRun(r); if (r.status !== 'running') clearInterval(timer.current) } catch { clearInterval(timer.current) }
+    }, 600)
+  }
+  const loadHistory = () => api('/history').then(setHist).catch(() => {})
 
   useEffect(() => {
     Promise.all([api('/schema'), api('/config')])
       .then(([s, c]) => { setSchema(s); setValues(c.values); if (c.saved) setSaved(c) })
       .catch(e => setFatal(e.message))
+    loadHistory()
+    // Pick up a run that was started before this page was opened or refreshed.
+    api('/run').then(r => { if (r.status !== 'idle') { setRun(r); if (r.status === 'running') poll() } }).catch(() => {})
     return () => clearInterval(timer.current)
   }, [])
+  // Warn before the tab closes with answers that were changed but not saved.
+  useEffect(() => {
+    if (!edited) return
+    const h = e => { if (dirty) { e.preventDefault(); e.returnValue = '' } }
+    window.addEventListener('beforeunload', h)
+    return () => window.removeEventListener('beforeunload', h)
+  })
+  // Move focus to the new step's heading so keyboard and screen-reader users land in the right place.
+  useEffect(() => {
+    if (firstStep.current) { firstStep.current = false; return }
+    head.current?.focus({ preventScroll: true })
+  }, [i])
   useEffect(() => { if (term.current) term.current.scrollTop = term.current.scrollHeight }, [run])
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 5000); return () => clearTimeout(t) }, [toast])
 
@@ -87,7 +114,7 @@ export default function App() {
   const doneCount = steps.filter((_, n) => status(n) === 'done').length
   const pct = Math.round((doneCount / steps.length) * 100)
 
-  const setVal = (k, v) => setValues(o => ({ ...o, [k]: v }))
+  const setVal = (k, v) => { setEdited(true); setValues(o => ({ ...o, [k]: v })) }
   const touch = k => setTouched(o => (o[k] ? o : { ...o, [k]: true }))
   const jump = n => { setVisited(o => ({ ...o, [i]: true })); setI(n); setAttempt(false); window.scrollTo({ top: 0, behavior: 'smooth' }) }
   const flash = (kind, title, body) => setToast({ kind, title, body })
@@ -101,12 +128,6 @@ export default function App() {
     jump(i + 1)
   }
 
-  const poll = () => {
-    clearInterval(timer.current)
-    timer.current = setInterval(async () => {
-      try { const r = await api('/run'); setRun(r); if (r.status !== 'running') clearInterval(timer.current) } catch { clearInterval(timer.current) }
-    }, 600)
-  }
   const start = async () => {
     setRun({ status: 'running', logs: [] })
     try { await api('/run', { method: 'POST' }); poll() } catch (e) { setRun(null); flash('err', 'Could not start the run', e.message) }
@@ -116,6 +137,7 @@ export default function App() {
     try {
       const r = await api('/config', { method: 'PUT', body: JSON.stringify({ values: clean }) })
       setSaved(r)
+      loadHistory()
       flash('ok', 'Configuration saved', `Version ${r.version} was written to ${r.path}`)
       if (andRun) await start()
     } catch (e) {
@@ -123,6 +145,15 @@ export default function App() {
       if (e.body?.errors) { const n = schema.steps.findIndex(s => s.fields.some(f => e.body.errors[f.key])); if (n >= 0) { setTouched(o => ({ ...o, ...Object.fromEntries(Object.keys(e.body.errors).map(k => [k, true])) })); setI(n) } }
     } finally { setBusy(false) }
   }
+
+  const loadVersion = async v => {
+    try {
+      const c = await api('/config?version=' + v)
+      setValues(c.values); setEdited(true); setTouched({}); setAttempt(false)
+      flash('ok', `Version ${v} loaded`, 'It is in the form now. Save to make it the current version.')
+    } catch (e) { flash('err', 'Could not load that version', e.message) }
+  }
+  const label = k => schema.steps.flatMap(s => s.fields).find(f => f.key === k)?.label || k
 
   // Required-answer meter for the current step
   const fields = onReview ? [] : cur.fields.filter(f => visible(f, values))
@@ -153,18 +184,18 @@ export default function App() {
       <main className="stage" onKeyDown={e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT' && !['range', 'date'].includes(e.target.type) && !e.defaultPrevented) { e.preventDefault(); next() } }}>
         <header key={cur.id} className="shead">
           <span className="count">Step {i + 1} of {steps.length}</span>
-          <h1>{cur.title}</h1>
+          <h1 ref={head} tabIndex={-1}>{cur.title}</h1>
           <p>{cur.subtitle}</p>
         </header>
 
         {!onReview && (
-          <div className={cx('guide', stepOk && 'ok')}>
+          <div className={cx('guide', stepOk && 'ok')} aria-live="polite">
             <span className="gico">{stepOk ? '✓' : '→'}</span>
             <div>
               <b>{!req.length ? 'Nothing is required here.' : stepOk ? 'All required answers are in.' : `${reqLeft} required ${reqLeft === 1 ? 'answer' : 'answers'} left on this step.`}</b>
               <small>{stepOk ? 'Press Continue (or Enter) to move on.' : !req.length ? 'The defaults are already sensible. Change only what you need.' : 'Fields marked Required must be filled before you can continue.'}</small>
             </div>
-            {!!req.length && <div className="meter">{req.map(f => <i key={f.key} className={errs[i][f.key] ? '' : 'on'} />)}</div>}
+            {!!req.length && <div className="meter" role="img" aria-label={`${req.length - reqLeft} of ${req.length} required answers done`}>{req.map(f => <i key={f.key} className={errs[i][f.key] ? '' : 'on'} />)}</div>}
           </div>
         )}
 
@@ -205,6 +236,26 @@ export default function App() {
               <section className="term" aria-live="polite">
                 <div className="thead"><i /><i /><i /><span>Pipeline output</span><em className={'st ' + run.status}>{run.status === 'running' ? 'Running' : run.status === 'done' ? 'Finished' : run.status}</em></div>
                 <div className="tbody" ref={term}>{run.logs.length ? run.logs.map((l, n) => <div key={n} className={'l ' + (l.split(/\s+/)[1] || '').toLowerCase()}>{l}</div>) : <div className="l">Starting…</div>}</div>
+              </section>
+            )}
+            {hist.length > 0 && (
+              <section className="rsec hist">
+                <div className="rhead"><h3>Version history</h3></div>
+                <ul>
+                  {hist.map(h => {
+                    const current = saved && h.version === saved.version && !dirty
+                    return (
+                      <li key={h.version}>
+                        <div>
+                          <b>Version {h.version}</b>{current && <span className="pill ok">Current</span>}
+                          <small>{when(h.savedAt)} · {h.first ? 'First save' : h.changed.length ? 'Changed: ' + h.changed.map(label).join(', ') : 'No changes'}</small>
+                        </div>
+                        <button className="btn ghosty small" disabled={current} onClick={() => loadVersion(h.version)}>Load into form</button>
+                      </li>
+                    )
+                  })}
+                </ul>
+                <small className="why">Loading a version only fills in the form. Nothing changes on disk until you save.</small>
               </section>
             )}
           </div>

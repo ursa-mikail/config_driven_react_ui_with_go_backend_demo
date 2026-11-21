@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +36,7 @@ type Field struct {
 	Default    any      `json:"default"`
 	Min        *float64 `json:"min"`
 	Max        *float64 `json:"max"`
+	Step       *float64 `json:"step"`
 	Pattern    string   `json:"pattern"`
 	PatternMsg string   `json:"patternMsg"`
 	Options    []Option `json:"options"`
@@ -50,7 +54,20 @@ var (
 	schema     Schema
 	optionsRaw []byte
 	configPath = env("CONFIG_FILE", "/data/config.json")
+	fileMode   = parseMode(env("CONFIG_FILE_MODE", "0600"))
 )
+
+const maxText = 2000 // longest text answer accepted
+const maxTags = 20   // most labels a tags field can hold
+
+// parseMode reads an octal permission string such as 0600 or 0644.
+func parseMode(s string) os.FileMode {
+	n, err := strconv.ParseUint(s, 8, 32)
+	if err != nil {
+		return 0o600
+	}
+	return os.FileMode(n)
+}
 
 func env(k, d string) string {
 	if v := os.Getenv(k); v != "" {
@@ -129,6 +146,16 @@ func check(f Field, v any) string {
 		if f.Max != nil && n > *f.Max {
 			return fmt.Sprintf("Must be at most %v.", *f.Max)
 		}
+		if f.Step != nil && *f.Step > 0 {
+			base := 0.0
+			if f.Min != nil {
+				base = *f.Min
+			}
+			q := (n - base) / *f.Step
+			if math.Abs(q-math.Round(q)) > 1e-6 {
+				return fmt.Sprintf("Use steps of %v.", *f.Step)
+			}
+		}
 	case "multicheck", "tags":
 		var arr []any
 		if v != nil {
@@ -141,11 +168,22 @@ func check(f Field, v any) string {
 		if f.Required && len(arr) == 0 {
 			return "Choose at least one."
 		}
+		if f.Type == "tags" && len(arr) > maxTags {
+			return fmt.Sprintf("Use at most %d labels.", maxTags)
+		}
+		seen := map[string]bool{}
 		for _, x := range arr {
 			s, ok := x.(string)
 			if !ok || (f.Type == "multicheck" && !inOptions(f, s)) {
 				return "Contains an option that does not exist."
 			}
+			if len(s) > 60 {
+				return "A label is too long (60 characters at most)."
+			}
+			if seen[s] {
+				return "Contains the same item twice."
+			}
+			seen[s] = true
 		}
 	default:
 		if isEmpty(v) {
@@ -159,6 +197,14 @@ func check(f Field, v any) string {
 			return "Must be text."
 		}
 		s = strings.TrimSpace(s)
+		if len(s) > maxText {
+			return fmt.Sprintf("Too long (%d characters at most).", maxText)
+		}
+		if f.Type == "date" {
+			if _, err := time.Parse("2006-01-02", s); err != nil {
+				return "Enter a real date."
+			}
+		}
 		if (f.Type == "select" || f.Type == "radio") && !inOptions(f, s) {
 			return "Pick one of the listed options."
 		}
@@ -177,6 +223,17 @@ func check(f Field, v any) string {
 // validate returns the cleaned config (hidden fields dropped) and per-field errors.
 func validate(cfg map[string]any) (map[string]any, map[string]string) {
 	clean, errs := map[string]any{}, map[string]string{}
+	known := map[string]bool{}
+	for _, s := range schema.Steps {
+		for _, f := range s.Fields {
+			known[f.Key] = true
+		}
+	}
+	for k := range cfg {
+		if !known[k] {
+			errs[k] = "Not a setting this pipeline knows about."
+		}
+	}
 	for _, s := range schema.Steps {
 		for _, f := range s.Fields {
 			if !visible(f, cfg) {
@@ -239,7 +296,10 @@ func writeFileAtomic(cfg map[string]any) error {
 		return err
 	}
 	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(b, '\n'), fileMode); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, fileMode); err != nil { // WriteFile keeps the mode of an existing temp file
 		return err
 	}
 	return os.Rename(tmp, configPath)
@@ -249,7 +309,21 @@ func handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	values, saved, version := defaults(), false, 0
 	var at time.Time
 	var raw []byte
-	err := db.QueryRow(`SELECT id, created_at, data FROM configs ORDER BY id DESC LIMIT 1`).Scan(&version, &at, &raw)
+	var err error
+	if v := r.URL.Query().Get("version"); v != "" {
+		id, perr := strconv.Atoi(v)
+		if perr != nil {
+			send(w, 400, map[string]any{"error": "version must be a number."})
+			return
+		}
+		err = db.QueryRow(`SELECT id, created_at, data FROM configs WHERE id = $1`, id).Scan(&version, &at, &raw)
+		if err == sql.ErrNoRows {
+			send(w, 404, map[string]any{"error": fmt.Sprintf("Version %d does not exist.", id)})
+			return
+		}
+	} else {
+		err = db.QueryRow(`SELECT id, created_at, data FROM configs ORDER BY id DESC LIMIT 1`).Scan(&version, &at, &raw)
+	}
 	if err == nil {
 		var m map[string]any
 		if json.Unmarshal(raw, &m) == nil {
@@ -289,21 +363,54 @@ func handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	send(w, 200, map[string]any{"version": id, "savedAt": at, "path": configPath, "values": clean})
 }
 
+// handleHistory lists recent versions with the names of the settings that changed in each.
+// It never returns the values themselves, so secrets cannot leak through this endpoint.
 func handleHistory(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`SELECT id, created_at, data FROM configs ORDER BY id DESC LIMIT 8`)
+	rows, err := db.Query(`SELECT id, created_at, data FROM configs ORDER BY id DESC LIMIT 11`)
 	if err != nil {
 		send(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
-	out := []map[string]any{}
+	type row struct {
+		id   int
+		at   time.Time
+		data map[string]any
+	}
+	var all []row
 	for rows.Next() {
-		var id int
-		var at time.Time
+		var x row
 		var raw []byte
-		if rows.Scan(&id, &at, &raw) == nil {
-			out = append(out, map[string]any{"version": id, "savedAt": at, "values": json.RawMessage(raw)})
+		if rows.Scan(&x.id, &x.at, &raw) == nil && json.Unmarshal(raw, &x.data) == nil {
+			all = append(all, x)
 		}
+	}
+	out := []map[string]any{}
+	for i, x := range all {
+		if i == 10 {
+			break // the 11th row only exists to compare against
+		}
+		var prev map[string]any
+		if i+1 < len(all) {
+			prev = all[i+1].data
+		}
+		changed := []string{}
+		keys := map[string]bool{}
+		for k := range x.data {
+			keys[k] = true
+		}
+		for k := range prev {
+			keys[k] = true
+		}
+		for k := range keys {
+			a, _ := json.Marshal(x.data[k])
+			b, _ := json.Marshal(prev[k])
+			if string(a) != string(b) {
+				changed = append(changed, k)
+			}
+		}
+		sort.Strings(changed)
+		out = append(out, map[string]any{"version": x.id, "savedAt": x.at, "changed": changed, "first": prev == nil})
 	}
 	send(w, 200, out)
 }
@@ -342,6 +449,14 @@ func list(c map[string]any, k string) []string {
 }
 
 func execute(cfg map[string]any) {
+	defer func() {
+		if p := recover(); p != nil {
+			run.add(fmt.Sprintf("%s  ERROR the run crashed: %v", time.Now().Format("15:04:05"), p))
+			run.mu.Lock()
+			run.status = "failed"
+			run.mu.Unlock()
+		}
+	}()
 	levels := map[string]int{"debug": 0, "info": 1, "warn": 2, "error": 3}
 	min, ok := levels[str(cfg, "log_level")]
 	if !ok {

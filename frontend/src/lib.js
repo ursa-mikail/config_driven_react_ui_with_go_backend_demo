@@ -9,17 +9,27 @@ const empty = x => x == null || (typeof x === 'string' && !x.trim())
 export function check(f, x) {
   const t = f.type
   if (t === 'toggle' || t === 'checkbox') return f.required && !x ? 'Tick this box to continue.' : ''
+  if (t === 'tags' && x && x.length > 20) return 'Use at most 20 labels.'
   if (t === 'multicheck' || t === 'tags') return f.required && !(x && x.length) ? 'Choose at least one.' : ''
   if (empty(x)) return f.required ? (t === 'number' ? 'Enter a number.' : t === 'select' || t === 'radio' ? 'Pick one option.' : 'This field is required.') : ''
   if (t === 'number' || t === 'slider') {
     if (typeof x !== 'number' || Number.isNaN(x)) return 'Enter a number.'
     if (f.min != null && x < f.min) return `Must be at least ${f.min}.`
     if (f.max != null && x > f.max) return `Must be at most ${f.max}.`
+    if (f.step > 0) { const q = (x - (f.min ?? 0)) / f.step; if (Math.abs(q - Math.round(q)) > 1e-6) return `Use steps of ${f.step}.` }
     return ''
   }
+  if (typeof x === 'string' && x.trim().length > 2000) return 'Too long (2000 characters at most).'
+  if (t === 'date' && (!/^\d{4}-\d{2}-\d{2}$/.test(x) || Number.isNaN(Date.parse(x)))) return 'Enter a real date.'
   if (f.pattern && !new RegExp(f.pattern).test(String(x).trim())) return f.patternMsg || 'That does not look right.'
   return ''
 }
+
+// The answers a brand-new config starts with, taken from each field's default.
+export const defaults = schema =>
+  Object.fromEntries(schema.steps.flatMap(s => s.fields).filter(f => f.default !== undefined).map(f => [f.key, f.default]))
+
+export const when = iso => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) }
 
 export const stepErrors = (step, v) =>
   Object.fromEntries(step.fields.filter(f => visible(f, v)).map(f => [f.key, check(f, v[f.key])]).filter(([, m]) => m))
