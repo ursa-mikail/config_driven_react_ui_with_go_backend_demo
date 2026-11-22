@@ -23,6 +23,9 @@ import (
 
 type Option struct {
 	Value string `json:"value"`
+	Label string `json:"label"`
+	Desc  string `json:"desc"`
+	Icon  string `json:"icon"`
 }
 type Cond struct {
 	Key    string `json:"key"`
@@ -30,29 +33,43 @@ type Cond struct {
 	In     []any  `json:"in"`
 }
 type Field struct {
-	Key        string   `json:"key"`
-	Type       string   `json:"type"`
-	Required   bool     `json:"required"`
-	Default    any      `json:"default"`
-	Min        *float64 `json:"min"`
-	Max        *float64 `json:"max"`
-	Step       *float64 `json:"step"`
-	Pattern    string   `json:"pattern"`
-	PatternMsg string   `json:"patternMsg"`
-	Options    []Option `json:"options"`
-	ShowIf     *Cond    `json:"showIf"`
+	Key         string   `json:"key"`
+	Type        string   `json:"type"`
+	Label       string   `json:"label"`
+	Help        string   `json:"help"`
+	Placeholder string   `json:"placeholder"`
+	Unit        string   `json:"unit"`
+	Required    bool     `json:"required"`
+	Default     any      `json:"default"`
+	Recommended any      `json:"recommended"`
+	Min         *float64 `json:"min"`
+	Max         *float64 `json:"max"`
+	Step        *float64 `json:"step"`
+	Pattern     string   `json:"pattern"`
+	PatternMsg  string   `json:"patternMsg"`
+	Options     []Option `json:"options"`
+	ShowIf      *Cond    `json:"showIf"`
 }
 type Step struct {
-	Fields []Field `json:"fields"`
+	ID       string  `json:"id"`
+	Title    string  `json:"title"`
+	Icon     string  `json:"icon"`
+	Subtitle string  `json:"subtitle"`
+	Fields   []Field `json:"fields"`
 }
 type Schema struct {
-	Steps []Step `json:"steps"`
+	Title    string `json:"title"`
+	Subtitle string `json:"subtitle"`
+	Steps    []Step `json:"steps"`
 }
 
 var (
 	db         *sql.DB
-	schema     Schema
-	optionsRaw []byte
+	schemaMu    sync.RWMutex
+	schema      Schema // the option file as last loaded successfully; use currentSchema()
+	optionsRaw  []byte
+	optionsPath = env("OPTIONS_FILE", "/app/options.json")
+	optionsSeen string // size+mtime of the file version we last looked at
 	configPath = env("CONFIG_FILE", "/data/config.json")
 	fileMode   = parseMode(env("CONFIG_FILE_MODE", "0600"))
 )
@@ -224,7 +241,8 @@ func check(f Field, v any) string {
 func validate(cfg map[string]any) (map[string]any, map[string]string) {
 	clean, errs := map[string]any{}, map[string]string{}
 	known := map[string]bool{}
-	for _, s := range schema.Steps {
+	sch := currentSchema()
+	for _, s := range sch.Steps {
 		for _, f := range s.Fields {
 			known[f.Key] = true
 		}
@@ -234,7 +252,7 @@ func validate(cfg map[string]any) (map[string]any, map[string]string) {
 			errs[k] = "Not a setting this pipeline knows about."
 		}
 	}
-	for _, s := range schema.Steps {
+	for _, s := range sch.Steps {
 		for _, f := range s.Fields {
 			if !visible(f, cfg) {
 				continue
@@ -254,7 +272,7 @@ func validate(cfg map[string]any) (map[string]any, map[string]string) {
 
 func defaults() map[string]any {
 	d := map[string]any{}
-	for _, s := range schema.Steps {
+	for _, s := range currentSchema().Steps {
 		for _, f := range s.Fields {
 			if f.Default != nil {
 				d[f.Key] = f.Default
@@ -262,6 +280,188 @@ func defaults() map[string]any {
 		}
 	}
 	return d
+}
+
+// ---------- option file: load, check, reload ----------
+
+var knownTypes = map[string]bool{"text": true, "password": true, "textarea": true, "number": true, "slider": true,
+	"select": true, "radio": true, "checkbox": true, "toggle": true, "multicheck": true, "tags": true, "date": true, "color": true}
+
+var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func currentSchema() Schema {
+	schemaMu.RLock()
+	defer schemaMu.RUnlock()
+	return schema
+}
+
+func currentRaw() []byte {
+	schemaMu.RLock()
+	defer schemaMu.RUnlock()
+	return optionsRaw
+}
+
+// checkOptions returns every problem it finds in the option file, each in plain words
+// that say where the problem is.
+func checkOptions(sc Schema) []string {
+	var bad []string
+	add := func(f string, a ...any) { bad = append(bad, fmt.Sprintf(f, a...)) }
+	if strings.TrimSpace(sc.Title) == "" {
+		add("top level: \"title\" is missing")
+	}
+	if len(sc.Steps) == 0 {
+		add("top level: \"steps\" is empty, so there would be nothing to show")
+	}
+	keys := map[string]bool{}
+	for _, s := range sc.Steps {
+		for _, f := range s.Fields {
+			if f.Key != "" {
+				keys[f.Key] = true
+			}
+		}
+	}
+	stepIDs := map[string]bool{}
+	seen := map[string]bool{}
+	for n, s := range sc.Steps {
+		where := fmt.Sprintf("step %d", n+1)
+		if s.ID != "" {
+			where = fmt.Sprintf("step %d (%s)", n+1, s.ID)
+		}
+		switch {
+		case s.ID == "":
+			add("%s: \"id\" is missing", where)
+		case stepIDs[s.ID]:
+			add("%s: step id %q is used twice", where, s.ID)
+		}
+		stepIDs[s.ID] = true
+		if strings.TrimSpace(s.Title) == "" {
+			add("%s: \"title\" is missing", where)
+		}
+		if len(s.Fields) == 0 {
+			add("%s: has no fields", where)
+		}
+		for _, f := range s.Fields {
+			w := where + ", field " + strconv.Quote(f.Key)
+			if !keyRe.MatchString(f.Key) {
+				add("%s: \"key\" must be letters, digits and underscores, not starting with a digit", w)
+				continue
+			}
+			if seen[f.Key] {
+				add("%s: key is used twice (keys must be unique across the whole file)", w)
+			}
+			seen[f.Key] = true
+			if !knownTypes[f.Type] {
+				add("%s: unknown type %q", w, f.Type)
+				continue
+			}
+			if strings.TrimSpace(f.Label) == "" {
+				add("%s: \"label\" is missing, the user would see an empty question", w)
+			}
+			switch f.Type {
+			case "select", "radio", "multicheck":
+				if len(f.Options) == 0 {
+					add("%s: a %s needs a non-empty \"options\" list", w, f.Type)
+				}
+				vals := map[string]bool{}
+				for i, o := range f.Options {
+					if o.Value == "" {
+						add("%s: option %d has no \"value\"", w, i+1)
+					}
+					if vals[o.Value] {
+						add("%s: option value %q is listed twice", w, o.Value)
+					}
+					vals[o.Value] = true
+					if strings.TrimSpace(o.Label) == "" {
+						add("%s: option %q has no \"label\", it would show as blank", w, o.Value)
+					}
+				}
+				if f.Type != "multicheck" {
+					if r, ok := f.Recommended.(string); ok && !vals[r] {
+						add("%s: \"recommended\" %q is not one of the options", w, r)
+					}
+				}
+			case "number", "slider":
+				if f.Min == nil || f.Max == nil {
+					add("%s: a %s needs both \"min\" and \"max\"", w, f.Type)
+				} else if *f.Min >= *f.Max {
+					add("%s: \"min\" must be smaller than \"max\"", w)
+				}
+				if f.Step != nil && *f.Step <= 0 {
+					add("%s: \"step\" must be above 0", w)
+				}
+			}
+			if f.Pattern != "" {
+				if _, err := regexp.Compile(f.Pattern); err != nil {
+					add("%s: \"pattern\" is not a valid expression (%v). Keep it simple: lookaheads are not supported", w, err)
+				}
+			}
+			if c := f.ShowIf; c != nil {
+				switch {
+				case !keys[c.Key]:
+					add("%s: \"showIf\" points at %q, which is not a field", w, c.Key)
+				case c.Key == f.Key:
+					add("%s: \"showIf\" cannot depend on the field itself", w)
+				case c.Equals == nil && c.In == nil:
+					add("%s: \"showIf\" needs \"equals\" or \"in\"", w)
+				}
+			}
+			// A default that the server would reject means the form starts out broken.
+			if f.Default != nil && f.Type != "checkbox" && f.Type != "toggle" && !isEmpty(f.Default) {
+				if msg := check(f, f.Default); msg != "" {
+					add("%s: the \"default\" fails its own rules (%s)", w, msg)
+				}
+			}
+		}
+	}
+	return bad
+}
+
+// loadOptions reads and checks the option file without touching what is currently in use.
+func loadOptions() (Schema, []byte, []string) {
+	var sc Schema
+	raw, err := os.ReadFile(optionsPath)
+	if err != nil {
+		return sc, nil, []string{"cannot read the option file: " + err.Error()}
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields() // catches typos such as "lable"
+	if err := dec.Decode(&sc); err != nil {
+		return sc, nil, []string{"the option file is not valid: " + err.Error()}
+	}
+	if bad := checkOptions(sc); len(bad) > 0 {
+		return sc, nil, bad
+	}
+	return sc, raw, nil
+}
+
+func stamp() string {
+	st, err := os.Stat(optionsPath)
+	if err != nil {
+		return "missing"
+	}
+	return fmt.Sprintf("%d-%d", st.Size(), st.ModTime().UnixNano())
+}
+
+// refreshOptions picks up edits to the option file. A file with problems is reported in the
+// log and the last good version stays in use, so a typo never takes the app down.
+func refreshOptions() {
+	st := stamp()
+	schemaMu.Lock()
+	defer schemaMu.Unlock()
+	if st == optionsSeen {
+		return
+	}
+	optionsSeen = st
+	sc, raw, bad := loadOptions()
+	if len(bad) > 0 {
+		log.Printf("option file changed but has %d problem(s); still using the previous version:", len(bad))
+		for _, b := range bad {
+			log.Println("  - " + b)
+		}
+		return
+	}
+	schema, optionsRaw = sc, raw
+	log.Printf("option file loaded: %q, %d steps", sc.Title, len(sc.Steps))
 }
 
 // ---------- storage ----------
@@ -540,20 +740,22 @@ func handleRunStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	var err error
-	optionsRaw, err = os.ReadFile(env("OPTIONS_FILE", "/app/options.json"))
-	if err != nil {
-		log.Fatal("cannot read option file: ", err)
+	optionsSeen = stamp()
+	sc, raw, bad := loadOptions()
+	if len(bad) > 0 {
+		log.Printf("the option file %s has %d problem(s):", optionsPath, len(bad))
+		for _, b := range bad {
+			log.Println("  - " + b)
+		}
+		os.Exit(1)
 	}
-	if err = json.Unmarshal(optionsRaw, &schema); err != nil {
-		log.Fatal("option file is not valid: ", err)
-	}
+	schema, optionsRaw = sc, raw
 	initDB()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/schema", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(optionsRaw)
+		w.Write(currentRaw())
 	})
 	mux.HandleFunc("GET /api/config", handleGetConfig)
 	mux.HandleFunc("PUT /api/config", handlePutConfig)
@@ -566,5 +768,8 @@ func main() {
 	mux.HandleFunc("GET /api/run", handleRunStatus)
 
 	log.Println("Config Studio API listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Fatal(http.ListenAndServe(":8080", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshOptions() // edits to options.json show up without a restart
+		mux.ServeHTTP(w, r)
+	})))
 }
